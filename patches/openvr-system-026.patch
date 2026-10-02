@@ -1,0 +1,456 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 17fd03e..ba7fe99 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -561,6 +561,9 @@ file(GLOB openvr-headers CONFIGURE_DEPENDS LIST_DIRECTORIES false ${CMAKE_SOURCE
+ 
+ # glob for stub generator libraries
+ file(GLOB stub-deps CONFIGURE_DEPENDS LIST_DIRECTORIES false ${CMAKE_SOURCE_DIR}/scripts/stubs/*)
++# Interface declarations are generator inputs too; avoid stale vtables on rebuild.
++file(GLOB reimpl-gen-deps CONFIGURE_DEPENDS LIST_DIRECTORIES false
++    ${CMAKE_SOURCE_DIR}/OpenOVR/Reimpl/*.h ${CMAKE_SOURCE_DIR}/OpenOVR/Reimpl/*.cpp)
+ 
+ # Command for running header splitting script
+ add_custom_command(
+@@ -574,7 +577,7 @@ add_custom_command(
+ add_custom_command(
+ 	OUTPUT ${GENERATED_DIR}/stubs.gen.cpp ${GENERATED_DIR}/static_bases.gen.h
+ 	COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/stubs.py ${CMAKE_SOURCE_DIR}/OpenOVR/Reimpl ${CMAKE_SOURCE_DIR}/OpenVRHeaders ${GENERATED_DIR}
+-	DEPENDS ${CMAKE_SOURCE_DIR}/scripts/stubs.py ${stub-deps} ${GENERATED_DIR}/interfaces/vrtypes.h
++	DEPENDS ${CMAKE_SOURCE_DIR}/scripts/stubs.py ${stub-deps} ${reimpl-gen-deps} ${GENERATED_DIR}/interfaces/vrtypes.h
+ 	COMMENT "Generating stubs..."
+ 	)
+ 
+diff --git a/OpenOVR/Reimpl/BaseApplications.cpp b/OpenOVR/Reimpl/BaseApplications.cpp
+index 614daca..05ee6b2 100644
+--- a/OpenOVR/Reimpl/BaseApplications.cpp
++++ b/OpenOVR/Reimpl/BaseApplications.cpp
+@@ -177,3 +177,10 @@ uint32_t BaseApplications::GetCurrentSceneProcessId()
+ {
+ 	STUBBED();
+ }
++
++OOVR_EVRApplicationError BaseApplications::RegisterSubprocess(uint32_t pid)
++{
++	// This in-process bridge has no shared SteamVR application manager.
++	OOVR_LOGF("RegisterSubprocess unsupported, pid=%u", pid);
++	return pid ? VRApplicationError_IPCFailed : VRApplicationError_InvalidParameter;
++}
+diff --git a/OpenOVR/Reimpl/BaseApplications.h b/OpenOVR/Reimpl/BaseApplications.h
+index e69e741..0c65dcb 100644
+--- a/OpenOVR/Reimpl/BaseApplications.h
++++ b/OpenOVR/Reimpl/BaseApplications.h
+@@ -80,6 +80,9 @@ struct OOVR_AppOverrideKeys_t {
+ 
+ class BaseApplications {
+ public:
++	// OpenVR 2.15.6 additions; optional capabilities report explicit errors.
++	OOVR_EVRApplicationError RegisterSubprocess(uint32_t pid);
++
+ 	typedef OOVR_EVRApplicationError EVRApplicationError;
+ 	typedef OOVR_EVRApplicationProperty EVRApplicationProperty;
+ 	typedef OOVR_EVRApplicationTransitionState EVRApplicationTransitionState;
+diff --git a/OpenOVR/Reimpl/BaseChaperoneSetup.cpp b/OpenOVR/Reimpl/BaseChaperoneSetup.cpp
+index 42cc309..61b08a6 100644
+--- a/OpenOVR/Reimpl/BaseChaperoneSetup.cpp
++++ b/OpenOVR/Reimpl/BaseChaperoneSetup.cpp
+@@ -119,7 +119,7 @@ bool BaseChaperoneSetup::ImportFromBufferToWorking(const char* pBuffer, uint32_t
+ {
+ 	STUBBED();
+ }
+-void BaseChaperoneSetup::SetWorkingPerimeter(VR_ARRAY_COUNT(unPointCount) HmdVector2_t* pPointBuffer, uint32_t unPointCount)
++void BaseChaperoneSetup::SetWorkingPerimeter(VR_ARRAY_COUNT(unPointCount) const HmdVector2_t* pPointBuffer, uint32_t unPointCount)
+ {
+ 	STUBBED();
+ }
+diff --git a/OpenOVR/Reimpl/BaseChaperoneSetup.h b/OpenOVR/Reimpl/BaseChaperoneSetup.h
+index a2fba31..19a5572 100644
+--- a/OpenOVR/Reimpl/BaseChaperoneSetup.h
++++ b/OpenOVR/Reimpl/BaseChaperoneSetup.h
+@@ -77,7 +77,7 @@ public:
+ 	bool ImportFromBufferToWorking(const char* pBuffer, uint32_t nImportFlags);
+ 
+ 	/** Sets the Collision Bounds in the working copy. */
+-	void SetWorkingPerimeter(VR_ARRAY_COUNT(unPointCount) vr::HmdVector2_t* pPointBuffer, uint32_t unPointCount);
++	void SetWorkingPerimeter(VR_ARRAY_COUNT(unPointCount) const vr::HmdVector2_t* pPointBuffer, uint32_t unPointCount);
+ 
+ 	/** Shows the chaperone data in the working set to preview in the compositor.*/
+ 	void ShowWorkingSetPreview();
+diff --git a/OpenOVR/Reimpl/BaseCompositor.cpp b/OpenOVR/Reimpl/BaseCompositor.cpp
+index da173a8..32fcb84 100644
+--- a/OpenOVR/Reimpl/BaseCompositor.cpp
++++ b/OpenOVR/Reimpl/BaseCompositor.cpp
+@@ -600,3 +600,13 @@ ovr_enum_t BaseCompositor::GetPosesForFrame(uint32_t unPosePredictionID, Tracked
+ {
+ 	STUBBED();
+ }
++
++int BaseCompositor::GetSubmitTexture(vr::Texture_t* output, bool* needsFlush,
++    OOVR_EVRCompositorTextureUsage, const vr::Texture_t*, const vr::VRTextureBounds_t*, vr::EVRSubmitFlags)
++{
++	// Submit still copies into the OpenXR swapchain. We do not expose a writable
++	// shared submit texture, and must not return the application's source as one.
++	if (output) *output = {};
++	if (needsFlush) *needsFlush = false;
++	return vr::IVRCompositor_022::VRCompositorError_SharedTexturesNotSupported;
++}
+diff --git a/OpenOVR/Reimpl/BaseCompositor.h b/OpenOVR/Reimpl/BaseCompositor.h
+index 458cc6a..cc1e4c0 100644
+--- a/OpenOVR/Reimpl/BaseCompositor.h
++++ b/OpenOVR/Reimpl/BaseCompositor.h
+@@ -1,6 +1,8 @@
+ #pragma once
+ #include "../BaseCommon.h" // TODO don't import from OCOVR, and remove the "../"
+ #include "generated/interfaces/IVRCompositor_022.h"
++#include "generated/interfaces/IVRCompositor_029.h"
++using OOVR_EVRCompositorTextureUsage = vr::IVRCompositor_029::EVRCompositorTextureUsage;
+ 
+ #include "../Compositor/compositor_backend.h" // TODO don't import from OCOVR, and remove the "../"
+ 
+@@ -118,6 +120,11 @@ private:
+ 	bool isNullRender = false;
+ 
+ public:
++	// OpenVR 2.15.6 additions; optional capabilities report explicit errors.
++	int GetSubmitTexture(vr::Texture_t* output, bool* needsFlush,
++	    OOVR_EVRCompositorTextureUsage usage, const vr::Texture_t* input,
++	    const vr::VRTextureBounds_t* bounds, vr::EVRSubmitFlags flags);
++
+ 	typedef int ovr_enum_t;
+ 
+ 	BaseCompositor();
+diff --git a/OpenOVR/Reimpl/BaseInput.cpp b/OpenOVR/Reimpl/BaseInput.cpp
+index 1091a21..40f627e 100644
+--- a/OpenOVR/Reimpl/BaseInput.cpp
++++ b/OpenOVR/Reimpl/BaseInput.cpp
+@@ -2815,3 +2815,18 @@ ITrackedDevice::TrackedDeviceType BaseInput::ParseAndRemoveHandPrefix(std::strin
+ 
+ 	return ITrackedDevice::HAND_NONE;
+ }
++
++vr::EVRInputError BaseInput::GetEyeTrackingDataRelativeToNow(vr::VRActionHandle_t,
++    vr::ETrackingUniverseOrigin, float, vr::VREyeTrackingData_t* output, uint32_t size)
++{
++	if (!output) return vr::VRInputError_InvalidParam;
++	if (size < sizeof(*output)) return vr::VRInputError_BufferTooSmall;
++	*output = {};
++	return vr::VRInputError_NoData;
++}
++
++vr::EVRInputError BaseInput::GetEyeTrackingDataForNextFrame(vr::VRActionHandle_t action,
++    vr::ETrackingUniverseOrigin origin, vr::VREyeTrackingData_t* output, uint32_t size)
++{
++	return GetEyeTrackingDataRelativeToNow(action, origin, 0, output, size);
++}
+diff --git a/OpenOVR/Reimpl/BaseInput.h b/OpenOVR/Reimpl/BaseInput.h
+index 09286c4..9d243c4 100644
+--- a/OpenOVR/Reimpl/BaseInput.h
++++ b/OpenOVR/Reimpl/BaseInput.h
+@@ -180,6 +180,13 @@ struct OOVR_InputBindingInfo_t {
+ 
+ class BaseInput {
+ public:
++	// OpenVR 2.15.6 additions; optional capabilities report explicit errors.
++	vr::EVRInputError GetEyeTrackingDataRelativeToNow(vr::VRActionHandle_t action,
++	    vr::ETrackingUniverseOrigin origin, float predictedSeconds,
++	    vr::VREyeTrackingData_t* output, uint32_t size);
++	vr::EVRInputError GetEyeTrackingDataForNextFrame(vr::VRActionHandle_t action,
++	    vr::ETrackingUniverseOrigin origin, vr::VREyeTrackingData_t* output, uint32_t size);
++
+ 	// Ctor/dtor
+ 	BaseInput();
+ 	~BaseInput();
+diff --git a/OpenOVR/Reimpl/BaseOverlay.cpp b/OpenOVR/Reimpl/BaseOverlay.cpp
+index f095f4e..8fef97c 100644
+--- a/OpenOVR/Reimpl/BaseOverlay.cpp
++++ b/OpenOVR/Reimpl/BaseOverlay.cpp
+@@ -973,3 +973,31 @@ EVROverlayError BaseOverlay::WaitFrameSync(uint32_t nTimeoutMs)
+ {
+ 	STUBBED();
+ }
++
++bool BaseOverlay::_PollNextEventWithHandle(vr::VREvent_t* event, uint32_t size, vr::VROverlayHandle_t* handle)
++{
++	if (!event || !handle || size < sizeof(vr::VREvent_t)) return false;
++	for (const auto& entry : overlays) {
++		auto candidate = reinterpret_cast<vr::VROverlayHandle_t>(entry.second);
++		if (entry.second && PollNextOverlayEvent(candidate, event, size)) {
++			*handle = candidate;
++			return true;
++		}
++	}
++	*handle = vr::k_ulOverlayHandleInvalid;
++	return false;
++}
++
++vr::EVROverlayError BaseOverlay::CreateSubviewOverlay(vr::VROverlayHandle_t, const char*,
++    const char*, vr::VROverlayHandle_t* output)
++{
++	if (!output) return vr::VROverlayError_InvalidParameter;
++	*output = vr::k_ulOverlayHandleInvalid;
++	// No parent/subview compositing is implemented by this bridge.
++	return vr::VROverlayError_RequestFailed;
++}
++
++vr::EVROverlayError BaseOverlay::SetSubviewPosition(vr::VROverlayHandle_t, float, float)
++{
++	return vr::VROverlayError_WrongTransformType;
++}
+diff --git a/OpenOVR/Reimpl/BaseOverlay.h b/OpenOVR/Reimpl/BaseOverlay.h
+index cb01dba..603ffac 100644
+--- a/OpenOVR/Reimpl/BaseOverlay.h
++++ b/OpenOVR/Reimpl/BaseOverlay.h
+@@ -194,8 +194,14 @@ private:
+ 	    VRKeyboard::eventDispatch_t eventDispatch);
+ 
+ public:
++	// OpenVR 2.15.6 additions; optional capabilities report explicit errors.
++	vr::EVROverlayError CreateSubviewOverlay(vr::VROverlayHandle_t parent, const char* key,
++	    const char* name, vr::VROverlayHandle_t* output);
++	vr::EVROverlayError SetSubviewPosition(vr::VROverlayHandle_t overlay, float x, float y);
++
+ 	// Destructor, since we have a map of pointers
+ 	~BaseOverlay();
++	bool _PollNextEventWithHandle(vr::VREvent_t* event, uint32_t size, vr::VROverlayHandle_t* handle);
+ 
+ 	// Builds the collection of layers to be submitted to LibOVR
+ 	int _BuildLayers(XrCompositionLayerBaseHeader* sceneLayer, XrCompositionLayerBaseHeader const* const*& result);
+diff --git a/OpenOVR/Reimpl/BaseSystem.cpp b/OpenOVR/Reimpl/BaseSystem.cpp
+index 60b5264..9ca99e3 100644
+--- a/OpenOVR/Reimpl/BaseSystem.cpp
++++ b/OpenOVR/Reimpl/BaseSystem.cpp
+@@ -875,3 +875,39 @@ void BaseSystem::ResetSeatedZeroPose()
+ 		}
+ 	}
+ }
++
++// These optional capabilities cannot be inferred from a synthetic SBS headset.
++bool BaseSystem::ComputeDistortionSet(vr::EVREye, vr::EVRDistortionChannel, bool,
++    uint32_t, const vr::DistortionCoordinate_t*, vr::DistortionCoordinate_t*)
++{
++	return false;
++}
++
++bool BaseSystem::GetEyeTrackedFoveationCenter(vr::HmdVector2_t* left, vr::HmdVector2_t* right)
++{
++	if (left) *left = {};
++	if (right) *right = {};
++	return false;
++}
++
++bool BaseSystem::GetEyeTrackedFoveationCenterForProjection(const vr::HmdMatrix44_t*, vr::HmdVector2_t* center)
++{
++	if (center) *center = {};
++	return false;
++}
++
++vr::EVRInitError BaseSystem::SetSDKVersion(uint32_t major, uint32_t minor, uint32_t build)
++{
++	OOVR_LOGF("Client SDK version %u.%u.%u", major, minor, build);
++	return vr::VRInitError_None;
++}
++
++bool BaseSystem::PollNextEventWithPoseAndOverlays(vr::ETrackingUniverseOrigin origin,
++    vr::VREvent_t* event, uint32_t size, vr::TrackedDevicePose_t* pose, vr::VROverlayHandle_t* overlay)
++{
++	if (!event || !overlay || size < sizeof(vr::VREvent_t)) return false;
++	*overlay = vr::k_ulOverlayHandleInvalid;
++	if (PollNextEventWithPose(origin, event, size, pose)) return true;
++	if (pose) *pose = {}; // overlay events do not carry a historical tracked pose
++	return GetBaseOverlay()->_PollNextEventWithHandle(event, size, overlay);
++}
+diff --git a/OpenOVR/Reimpl/BaseSystem.h b/OpenOVR/Reimpl/BaseSystem.h
+index 53ec201..e663652 100644
+--- a/OpenOVR/Reimpl/BaseSystem.h
++++ b/OpenOVR/Reimpl/BaseSystem.h
+@@ -54,6 +54,15 @@ public:
+ public:
+ 	BaseSystem();
+ 
++	// OpenVR 2.15.6 ABI. Optional eye tracking/distortion remain explicitly unsupported.
++	bool ComputeDistortionSet(vr::EVREye eye, vr::EVRDistortionChannel channel, bool ndc,
++	    uint32_t count, const vr::DistortionCoordinate_t* input, vr::DistortionCoordinate_t* output);
++	bool PollNextEventWithPoseAndOverlays(vr::ETrackingUniverseOrigin origin, vr::VREvent_t* event,
++	    uint32_t size, vr::TrackedDevicePose_t* pose, vr::VROverlayHandle_t* overlay);
++	bool GetEyeTrackedFoveationCenter(vr::HmdVector2_t* left, vr::HmdVector2_t* right);
++	bool GetEyeTrackedFoveationCenterForProjection(const vr::HmdMatrix44_t* projection, vr::HmdVector2_t* center);
++	vr::EVRInitError SetSDKVersion(uint32_t major, uint32_t minor, uint32_t build);
++
+ 	// ------------------------------------
+ 	// Display Methods
+ 	// ------------------------------------
+diff --git a/OpenOVR/Reimpl/CVRApplications.cpp b/OpenOVR/Reimpl/CVRApplications.cpp
+index 5196caa..8d3574f 100644
+--- a/OpenOVR/Reimpl/CVRApplications.cpp
++++ b/OpenOVR/Reimpl/CVRApplications.cpp
+@@ -10,3 +10,4 @@ GEN_INTERFACE("Applications", "004")
+ GEN_INTERFACE("Applications", "005")
+ GEN_INTERFACE("Applications", "006")
+ GEN_INTERFACE("Applications", "007")
++GEN_INTERFACE("Applications", "008")
+diff --git a/OpenOVR/Reimpl/CVRCompositor.cpp b/OpenOVR/Reimpl/CVRCompositor.cpp
+index dc0cab9..cf67eb4 100644
+--- a/OpenOVR/Reimpl/CVRCompositor.cpp
++++ b/OpenOVR/Reimpl/CVRCompositor.cpp
+@@ -20,6 +20,7 @@ GEN_INTERFACE("Compositor", "024")
+ GEN_INTERFACE("Compositor", "026")
+ GEN_INTERFACE("Compositor", "027")
+ GEN_INTERFACE("Compositor", "028")
++GEN_INTERFACE("Compositor", "029")
+ 
+ #include "generated/GVRCompositor.gen.h"
+ 
+diff --git a/OpenOVR/Reimpl/CVRInput.cpp b/OpenOVR/Reimpl/CVRInput.cpp
+index 816dd78..9ae1e9d 100644
+--- a/OpenOVR/Reimpl/CVRInput.cpp
++++ b/OpenOVR/Reimpl/CVRInput.cpp
+@@ -8,6 +8,7 @@ GEN_INTERFACE("Input", "006")
+ GEN_INTERFACE("Input", "007")
+ // version 8 and 9 are skipped
+ GEN_INTERFACE("Input", "010")
++GEN_INTERFACE("Input", "011")
+ 
+ #include "generated/GVRInput.gen.h"
+ 
+diff --git a/OpenOVR/Reimpl/CVROverlay.cpp b/OpenOVR/Reimpl/CVROverlay.cpp
+index faeea0e..49414b4 100644
+--- a/OpenOVR/Reimpl/CVROverlay.cpp
++++ b/OpenOVR/Reimpl/CVROverlay.cpp
+@@ -21,6 +21,7 @@ GEN_INTERFACE("Overlay", "024")
+ GEN_INTERFACE("Overlay", "025")
+ GEN_INTERFACE("Overlay", "026")
+ GEN_INTERFACE("Overlay", "027")
++GEN_INTERFACE("Overlay", "028")
+ 
+ #include "generated/GVROverlay.gen.h"
+ 
+diff --git a/OpenOVR/Reimpl/CVRSystem.cpp b/OpenOVR/Reimpl/CVRSystem.cpp
+index d0e0a5d..f425085 100644
+--- a/OpenOVR/Reimpl/CVRSystem.cpp
++++ b/OpenOVR/Reimpl/CVRSystem.cpp
+@@ -15,6 +15,7 @@ GEN_INTERFACE("System", "019")
+ GEN_INTERFACE("System", "020")
+ GEN_INTERFACE("System", "021")
+ GEN_INTERFACE("System", "022")
++GEN_INTERFACE("System", "026")
+ 
+ #include "generated/GVRSystem.gen.h"
+ 
+diff --git a/OpenOVR/Reimpl/Interfaces.h b/OpenOVR/Reimpl/Interfaces.h
+index 9f29faa..e3b4858 100644
+--- a/OpenOVR/Reimpl/Interfaces.h
++++ b/OpenOVR/Reimpl/Interfaces.h
+@@ -5,6 +5,7 @@
+ // Since our interfaces don't use CVRCommon as their first ancestor, this
+ // would return a reference to the CVRCommon part of the object.
+ void* CreateInterfaceByName(const char* name);
++bool IsInterfaceNameKnown(const char* name);
+ 
+ // Get information about a given interface
+ // name - The name of the interface (i.e. "IVRApplications_002")
+diff --git a/scripts/libparse.py b/scripts/libparse.py
+index 03100a8..c7ca6d8 100644
+--- a/scripts/libparse.py
++++ b/scripts/libparse.py
+@@ -9,7 +9,7 @@ regex = re.compile(regex_src)
+ arg_src = r"(?P<type>[^=]+ \**)(?P<name>\w+)(?: = (?P<default>.*))?"
+ argr = re.compile(arg_src)
+ 
+-typedecl = re.compile(r"^(?:enum|struct)\s+(?P<name>\w+)$")
++typedecl = re.compile(r"^(?:enum(?:\s+class)?|struct)\s+(?P<name>\w+)(?:\s*:\s*\w+)?$")
+ 
+ typedef = re.compile(r"^typedef\s+(?P<def>[\w\s\d_\*&]+)\s+(?P<name>\w+);$")
+ typedef_struct = re.compile(r"^typedef\s+(?:struct|union)$")
+diff --git a/scripts/split_headers.py b/scripts/split_headers.py
+index 3fc98b3..7788a33 100644
+--- a/scripts/split_headers.py
++++ b/scripts/split_headers.py
+@@ -45,6 +45,7 @@ versions = [
+     "1.16.8",
+     "1.23.7",
+     "2.5.1",
++    "2.15.6",
+ ]
+ 
+ driver_versions = [
+diff --git a/scripts/stubs/codegen.py b/scripts/stubs/codegen.py
+index 39cebd4..ce38167 100644
+--- a/scripts/stubs/codegen.py
++++ b/scripts/stubs/codegen.py
+@@ -146,6 +146,14 @@ def _build_fntable(fi, ver: InterfaceDef):
+ 
+ 
+ def write_stub_footer(fi, interfaces: List[InterfaceSpec]):
++    # Keep version validation in sync with the actual generated vtables.
++    fi.write("bool IsInterfaceNameKnown(const char *name) {\n")
++    fi.write("\tif(!name) return false;\n")
++    for spec in interfaces:
++        for ver in spec.versions:
++            fi.write(f"\tif(strcmp({ver.version_variable()}, name) == 0) return true;\n")
++    fi.write("\treturn false;\n}\n")
++
+     # Generate CreateInterfaceByName
+     fi.write("// Get interface by name\n")
+     fi.write("void *CreateInterfaceByName(const char *name) {\n")
+diff --git a/OCOVR/openvr_api.cpp b/OCOVR/openvr_api.cpp
+--- a/OCOVR/openvr_api.cpp
++++ b/OCOVR/openvr_api.cpp
+@@ -51,9 +51,13 @@
+ 
+ VR_INTERFACE void* VR_CALLTYPE VR_GetGenericInterface(const char* interfaceVersion, EVRInitError* error)
+ {
++	if (!interfaceVersion) {
++		if (error) *error = VRInitError_Init_InterfaceNotFound;
++		return nullptr;
++	}
+ 	if (!running) {
+ 		OOVR_LOGF("[INFO] VR_GetGenericInterface called while OOVR not running, setting error=NotInitialized, for interfaceVersion=%s", interfaceVersion);
+-		*error = VRInitError_Init_NotInitialized;
++		if (error) *error = VRInitError_Init_NotInitialized;
+ 		return NULL;
+ 	}
+ 
+@@ -103,6 +107,13 @@
+ 	if (!strcmp("IVROCSystem_001", interfaceVersion)) {
+ 		if (error)
+ 			*error = VRInitError_Init_InterfaceNotFound;
++		return nullptr;
++	}
++
++	// Capability queries must be recoverable; applications probe optional APIs.
++	if (!interfaceVersion || !IsInterfaceNameKnown(interfaceVersion)) {
++		OOVR_LOGF("Unsupported interface: %s", interfaceVersion ? interfaceVersion : "(null)");
++		if (error) *error = VRInitError_Init_InterfaceNotFound;
+ 		return nullptr;
+ 	}
+ 
+@@ -339,7 +350,10 @@
+ 
+ VR_INTERFACE bool VR_CALLTYPE VR_IsInterfaceVersionValid(const char* pchInterfaceVersion)
+ {
+-	return true; // Kinda dodgy
++	if (!pchInterfaceVersion) return false;
++	const char* name = pchInterfaceVersion;
++	if (strncmp(name, "FnTable:", 8) == 0) name += 8;
++	return IsInterfaceNameKnown(name);
+ }
+ 
+ VR_INTERFACE bool VR_CALLTYPE VR_IsRuntimeInstalled()
+@@ -404,3 +418,17 @@
+ 	OOVR_MESSAGE(pInterfaceName, "Missing client interface");
+ 	ERR("unknown/unsupported interface " + name);
+ }
++
++// Alyx imports these accessors directly in addition to VR_GetGenericInterface.
++// Bind to the matching maintained ABI, not an unrelated legacy interface.
++VR_INTERFACE void* VR_CALLTYPE VRControlPanel()
++{
++	EVRInitError error = VRInitError_None;
++	return VR_GetGenericInterface("IVRControlPanel_006", &error);
++}
++
++VR_INTERFACE void* VR_CALLTYPE VRHeadsetView()
++{
++	EVRInitError error = VRInitError_None;
++	return VR_GetGenericInterface("IVRHeadsetView_001", &error);
++}

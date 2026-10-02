@@ -1,7 +1,8 @@
 param(
     [string]$VulkanSdk = $env:VULKAN_SDK,
     [string]$WorkDirectory = (Join-Path $PSScriptRoot "build"),
-    [string]$Version = "dev"
+    [string]$Version = "dev",
+    [switch]$EnableSystem026
 )
 
 $ErrorActionPreference = "Stop"
@@ -41,6 +42,22 @@ git -C $source apply --check $patch
 if ($LASTEXITCODE -ne 0) { throw "The patch no longer applies to $commit" }
 git -C $source apply $patch
 if ($LASTEXITCODE -ne 0) { throw "Could not apply the patch" }
+
+# Opt-in until a Windows build and Alyx replay validate the newer ABI. The default
+# recipe still reproduces the reviewed v2 payload used by XRGame Native.
+if ($EnableSystem026) {
+    $header = Join-Path $PSScriptRoot "vendor\openvr-2.15.6\openvr.h"
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $header).Hash.ToLowerInvariant() -ne
+        "1e6ed57199896cc1f7c5484e50fa18955e97be15be690beb28d998c877ead7fd") {
+        throw "OpenVR 2.15.6 header checksum mismatch"
+    }
+    Copy-Item -LiteralPath $header -Destination (Join-Path $source "OpenVRHeaders\openvr-2.15.6.h")
+    $systemPatch = Join-Path $PSScriptRoot "patches\openvr-system-026.patch"
+    git -C $source apply --check $systemPatch
+    if ($LASTEXITCODE -ne 0) { throw "System 026 patch no longer applies" }
+    git -C $source apply $systemPatch
+    if ($LASTEXITCODE -ne 0) { throw "Could not apply System 026 patch" }
+}
 
 $bundledVulkan = Join-Path $source "libs\vulkan"
 New-Item -ItemType Directory -Force -Path (Join-Path $bundledVulkan "Include"), (Join-Path $bundledVulkan "Lib") | Out-Null
