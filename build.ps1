@@ -47,8 +47,12 @@ if ($LASTEXITCODE -ne 0) { throw "Could not apply the patch" }
 # recipe still reproduces the reviewed v2 payload used by XRGame Native.
 if ($EnableSystem026) {
     $header = Join-Path $PSScriptRoot "vendor\openvr-2.15.6\openvr.h"
-    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $header).Hash.ToLowerInvariant() -ne
-        "1e6ed57199896cc1f7c5484e50fa18955e97be15be690beb28d998c877ead7fd") {
+    # The pinned hash is of the LF file; a Windows checkout with core.autocrlf has CRLF.
+    $headerText = [System.IO.File]::ReadAllText($header).Replace("`r`n", "`n")
+    $headerBytes = [System.Text.UTF8Encoding]::new($false).GetBytes($headerText)
+    $headerHash = -join ([System.Security.Cryptography.SHA256]::HashData($headerBytes) |
+        ForEach-Object { $_.ToString("x2") })
+    if ($headerHash -ne "1e6ed57199896cc1f7c5484e50fa18955e97be15be690beb28d998c877ead7fd") {
         throw "OpenVR 2.15.6 header checksum mismatch"
     }
     Copy-Item -LiteralPath $header -Destination (Join-Path $source "OpenVRHeaders\openvr-2.15.6.h")
@@ -58,6 +62,15 @@ if ($EnableSystem026) {
     git -C $source apply $systemPatch
     if ($LASTEXITCODE -ne 0) { throw "Could not apply System 026 patch" }
 }
+
+# Forwards SteamVR mailbox messages (Half-Life: Alyx loading interstitials) to the OpenXR
+# runtime through xrSendMailboxMessageGNX; a no-op on runtimes without that function.
+$mailboxPatch = Join-Path $PSScriptRoot "patches\mailbox-forward.patch"
+$mailboxMarker = "xrSendMailboxMessageGNX"
+git -C $source apply --check $mailboxPatch
+if ($LASTEXITCODE -ne 0) { throw "Mailbox forward patch no longer applies" }
+git -C $source apply $mailboxPatch
+if ($LASTEXITCODE -ne 0) { throw "Could not apply the mailbox forward patch" }
 
 $bundledVulkan = Join-Path $source "libs\vulkan"
 New-Item -ItemType Directory -Force -Path (Join-Path $bundledVulkan "Include"), (Join-Path $bundledVulkan "Lib") | Out-Null
@@ -76,6 +89,7 @@ $bytes = [System.IO.File]::ReadAllBytes($binary)
 $offset = [BitConverter]::ToInt32($bytes, 0x3c)
 if ([BitConverter]::ToUInt16($bytes, $offset + 4) -ne 0x8664) { throw "Output is not x64" }
 if (-not [System.Text.Encoding]::ASCII.GetString($bytes).Contains($marker)) { throw "Output does not contain the background-app patch" }
+if (-not [System.Text.Encoding]::ASCII.GetString($bytes).Contains($mailboxMarker)) { throw "Output does not contain the mailbox forward patch" }
 
 $destination = Join-Path $output "opencomposite_x64.dll"
 Copy-Item -Force -LiteralPath $binary -Destination $destination

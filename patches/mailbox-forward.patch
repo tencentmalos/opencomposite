@@ -1,0 +1,32 @@
+diff --git a/OpenOVR/Reimpl/BaseMailbox.cpp b/OpenOVR/Reimpl/BaseMailbox.cpp
+index 2512022..a3b7cb9 100644
+--- a/OpenOVR/Reimpl/BaseMailbox.cpp
++++ b/OpenOVR/Reimpl/BaseMailbox.cpp
+@@ -22,8 +22,27 @@ MboxErr BaseMailbox::UnregisterMailbox(OOVR_mbox_handle mbox)
+ 	return VR_MBox_None;
+ }
+ 
++// XRGame Native: SteamVR draws some application UI that apps drive through mailbox messages,
++// such as Half-Life: Alyx's loading interstitials ("hlvr/interstitials": begin_loading,
++// show_message, end_loading). There is no SteamVR here, so hand the messages to the OpenXR
++// runtime if it offers xrSendMailboxMessageGNX; runtimes without it keep the old behaviour.
++typedef XrResult(XRAPI_PTR* PFN_xrSendMailboxMessageGNX)(XrInstance instance, const char* mailbox, const char* message);
++
+ MboxErr BaseMailbox::SendMessage(OOVR_mbox_handle mbox, const char* type, const char* message)
+ {
++	static XrInstance forwardInstance = XR_NULL_HANDLE;
++	static PFN_xrSendMailboxMessageGNX forward = nullptr;
++	if (xr_instance != XR_NULL_HANDLE && xr_instance != forwardInstance) {
++		forwardInstance = xr_instance;
++		forward = nullptr;
++		if (XR_FAILED(xrGetInstanceProcAddr(xr_instance, "xrSendMailboxMessageGNX", (PFN_xrVoidFunction*)&forward)))
++			forward = nullptr;
++	}
++	if (forward && type && message && XR_SUCCEEDED(forward(xr_instance, type, message))) {
++		OOVR_LOGF("Forwarded mailbox message to the OpenXR runtime, type '%s' contents '%s'", type, message);
++		return VR_MBox_None;
++	}
++
+ 	OOVR_LOGF("Pretending to send mailbox message, type '%s' contents '%s'", type, message);
+ 	return VR_MBox_None;
+ }
