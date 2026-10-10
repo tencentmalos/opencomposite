@@ -6,6 +6,7 @@ Every release is built by GitHub Actions on a Windows runner from the upstream c
 
 ## Patches
 
+- `displayed-bounds-copy.patch`: the D3D11 compositor copies only the submitted texture bounds (plus a 2-pixel margin) into each eye's swapchain, at the same position, instead of the whole texture. Half-Life: Alyx submits one double-wide texture that is larger than its current resolution, so a full copy per eye moved about four times the displayed pixels. While `C:\gamenative-xr\opencomposite-full-copy` exists the whole texture is copied again, for same-session A/B measurements.
 - `background-support.patch`: on Windows, `VR_Init` with `VRApplication_Background` returns `VRInitError_Init_NoServerForBackgroundApp` instead of aborting. GameNative embeds OpenComposite in each Wine process and has no shared vrserver, so helper processes that use the background app type must not open a competing OpenXR session. Also adds the `<chrono>` include current MSVC needs to compile `XrHMD.cpp`.
 
 ## Releasing

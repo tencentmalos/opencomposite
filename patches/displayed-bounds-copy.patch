@@ -1,0 +1,108 @@
+diff --git a/OpenOVR/Compositor/compositor.cpp b/OpenOVR/Compositor/compositor.cpp
+index c9456b5..8a8d607 100644
+--- a/OpenOVR/Compositor/compositor.cpp
++++ b/OpenOVR/Compositor/compositor.cpp
+@@ -16,7 +16,9 @@ void Compositor::Invoke(const vr::Texture_t* texture, const vr::VRTextureBounds_
+ 	bool invertInCompositor = oovr_global_configuration.InvertUsingShaders();
+ 	if (bounds && bounds->vMin == 0.0f && bounds->vMax == 1.0f && bounds->uMin == 0.0f && bounds->uMax == 1.0f)
+ 		bounds = nullptr;
++	displayBounds = invertInCompositor ? nullptr : bounds;
+ 	CopyToSwapchain(texture, invertInCompositor ? bounds : nullptr, eye, submitFlags);
++	displayBounds = nullptr;
+ 	subImage.swapchain = GetSwapChain();
+ 	subImage.imageArrayIndex = 0; // This is *not* the swapchain index
+ 	XrExtent2Di src = GetSrcSize();
+diff --git a/OpenOVR/Compositor/compositor.h b/OpenOVR/Compositor/compositor.h
+index e83a16a..27791ae 100644
+--- a/OpenOVR/Compositor/compositor.h
++++ b/OpenOVR/Compositor/compositor.h
+@@ -46,6 +46,10 @@ protected:
+ 
+ 	XrSwapchain chain = XR_NULL_HANDLE;
+ 
++	// The part of the texture the layer will show (set by Invoke during CopyToSwapchain).
++	// A backend that copies the full texture may copy only this region instead.
++	const vr::VRTextureBounds_t* displayBounds = nullptr;
++
+ 	// The request used to create the current swapchain. This can be used to check if the swapchain needs recreating.
+ 	XrSwapchainCreateInfo createInfo{};
+ 
+diff --git a/OpenOVR/Compositor/dx11compositor.cpp b/OpenOVR/Compositor/dx11compositor.cpp
+index 2ed44d2..8f572f9 100644
+--- a/OpenOVR/Compositor/dx11compositor.cpp
++++ b/OpenOVR/Compositor/dx11compositor.cpp
+@@ -9,6 +9,26 @@
+ 
+ #include <d3dcompiler.h> // For compiling shaders! D3DCompile
+ 
++#include <algorithm>
++#include <cmath>
++
++// A/B switch for measurements: while C:\gamenative-xr\opencomposite-full-copy exists, the
++// whole texture is copied again. Checked at most once a second.
++static bool FullCopyRequested()
++{
++	static ULONGLONG checkedAt = 0;
++	static bool full = false;
++	const ULONGLONG now = GetTickCount64();
++	if (checkedAt == 0 || now - checkedAt >= 1000) {
++		checkedAt = now;
++		const bool requested = GetFileAttributesW(L"C:\\gamenative-xr\\opencomposite-full-copy") != INVALID_FILE_ATTRIBUTES;
++		if (requested != full)
++			OOVR_LOGF("Full texture copy %s", requested ? "requested" : "released");
++		full = requested;
++	}
++	return full;
++}
++
+ #pragma comment(lib, "d3dcompiler.lib")
+ 
+ constexpr char fs_shader_code[] = R"_(
+@@ -387,13 +407,45 @@ void DX11Compositor::CopyToSwapchain(const vr::Texture_t* texture, const vr::VRT
+ 	} else {
+ 		// Apparently SteamVR supports apps just sending array textures without specifying what's what.
+ 		const int arrayIndex = (srcDesc.ArraySize > 1 && eye.has_value()) ? static_cast<int>(*eye) : 0;
++
++		// Copy only the region the layer shows, at the same position, plus a small margin for
++		// filtering at its edges. Games such as Half-Life: Alyx submit one double-wide texture
++		// for both eyes that is also larger than their current dynamic resolution, so a full
++		// copy per eye moves several times the pixels that are displayed.
++		D3D11_BOX copyRegion = sourceRegion;
++		UINT dstX = 0, dstY = 0;
++		const vr::VRTextureBounds_t* shown = displayBounds;
++		if (!bounds && shown && !FullCopyRequested() && std::isfinite(shown->uMin) && std::isfinite(shown->uMax) && std::isfinite(shown->vMin) && std::isfinite(shown->vMax)) {
++			const int width = static_cast<int>(std::min<UINT>(srcDesc.Width, createInfo.width));
++			const int height = static_cast<int>(std::min<UINT>(srcDesc.Height, createInfo.height));
++			const int margin = 2;
++			const float u0 = std::clamp(std::min(shown->uMin, shown->uMax), 0.0f, 1.0f);
++			const float u1 = std::clamp(std::max(shown->uMin, shown->uMax), 0.0f, 1.0f);
++			const float v0 = std::clamp(std::min(shown->vMin, shown->vMax), 0.0f, 1.0f);
++			const float v1 = std::clamp(std::max(shown->vMin, shown->vMax), 0.0f, 1.0f);
++			const int left = std::max(static_cast<int>(std::floor(u0 * width)) - margin, 0);
++			const int right = std::min(static_cast<int>(std::ceil(u1 * width)) + margin, width);
++			const int top = std::max(static_cast<int>(std::floor(v0 * height)) - margin, 0);
++			const int bottom = std::min(static_cast<int>(std::ceil(v1 * height)) + margin, height);
++			if (left < right && top < bottom) {
++				copyRegion = { static_cast<UINT>(left), static_cast<UINT>(top), 0, static_cast<UINT>(right), static_cast<UINT>(bottom), 1 };
++				dstX = copyRegion.left;
++				dstY = copyRegion.top;
++				static int logged = 0;
++				if (logged < 8) {
++					logged++;
++					OOVR_LOGF("Copying only the displayed bounds: %dx%d at %d,%d of %dx%d", right - left, bottom - top, left, top, width, height);
++				}
++			}
++		}
++
+ 		if (srcDesc.SampleDesc.Count > 1) {
+ 			D3D11_TEXTURE2D_DESC resDesc = srcDesc;
+ 			resDesc.SampleDesc.Count = 1;
+ 			context->ResolveSubresource(resolvedMSAATextures[currentIndex], 0, src, arrayIndex, resDesc.Format);
+-			context->CopySubresourceRegion(imagesHandles[currentIndex].texture, 0, 0, 0, 0, resolvedMSAATextures[currentIndex], arrayIndex, &sourceRegion);
++			context->CopySubresourceRegion(imagesHandles[currentIndex].texture, 0, dstX, dstY, 0, resolvedMSAATextures[currentIndex], arrayIndex, &copyRegion);
+ 		} else {
+-			context->CopySubresourceRegion(imagesHandles[currentIndex].texture, 0, 0, 0, 0, src, arrayIndex, &sourceRegion);
++			context->CopySubresourceRegion(imagesHandles[currentIndex].texture, 0, dstX, dstY, 0, src, arrayIndex, &copyRegion);
+ 		}
+ 	}
+ 

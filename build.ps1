@@ -72,6 +72,15 @@ if ($LASTEXITCODE -ne 0) { throw "Mailbox forward patch no longer applies" }
 git -C $source apply $mailboxPatch
 if ($LASTEXITCODE -ne 0) { throw "Could not apply the mailbox forward patch" }
 
+# D3D11 copies only the submitted bounds into each eye's swapchain instead of the whole texture;
+# Half-Life: Alyx submits one double-wide, dynamic-resolution texture for both eyes.
+$boundsPatch = Join-Path $PSScriptRoot "patches\displayed-bounds-copy.patch"
+$boundsMarker = "Copying only the displayed bounds"
+git -C $source apply --check $boundsPatch
+if ($LASTEXITCODE -ne 0) { throw "Displayed-bounds copy patch no longer applies" }
+git -C $source apply $boundsPatch
+if ($LASTEXITCODE -ne 0) { throw "Could not apply the displayed-bounds copy patch" }
+
 $bundledVulkan = Join-Path $source "libs\vulkan"
 New-Item -ItemType Directory -Force -Path (Join-Path $bundledVulkan "Include"), (Join-Path $bundledVulkan "Lib") | Out-Null
 Copy-Item -Recurse -Force -Path (Join-Path $vulkanInclude "*") -Destination (Join-Path $bundledVulkan "Include")
@@ -90,6 +99,7 @@ $offset = [BitConverter]::ToInt32($bytes, 0x3c)
 if ([BitConverter]::ToUInt16($bytes, $offset + 4) -ne 0x8664) { throw "Output is not x64" }
 if (-not [System.Text.Encoding]::ASCII.GetString($bytes).Contains($marker)) { throw "Output does not contain the background-app patch" }
 if (-not [System.Text.Encoding]::ASCII.GetString($bytes).Contains($mailboxMarker)) { throw "Output does not contain the mailbox forward patch" }
+if (-not [System.Text.Encoding]::ASCII.GetString($bytes).Contains($boundsMarker)) { throw "Output does not contain the displayed-bounds copy patch" }
 
 $destination = Join-Path $output "opencomposite_x64.dll"
 Copy-Item -Force -LiteralPath $binary -Destination $destination
