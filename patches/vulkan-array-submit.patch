@@ -1,0 +1,99 @@
+diff --git a/OpenOVR/Compositor/compositor.cpp b/OpenOVR/Compositor/compositor.cpp
+index 8a8d607..530d081 100644
+--- a/OpenOVR/Compositor/compositor.cpp
++++ b/OpenOVR/Compositor/compositor.cpp
+@@ -3,6 +3,8 @@
+ #include "../Misc/Config.h"
+ #include "compositor.h"
+ 
++#include <algorithm>
++
+ Compositor::~Compositor()
+ {
+ 	if (chain) {
+@@ -14,6 +16,13 @@ Compositor::~Compositor()
+ void Compositor::Invoke(const vr::Texture_t* texture, const vr::VRTextureBounds_t* bounds, XrSwapchainSubImage& subImage, std::optional<XruEye> eye, vr::EVRSubmitFlags submitFlags)
+ {
+ 	bool invertInCompositor = oovr_global_configuration.InvertUsingShaders();
++	// Half-Life: Alyx with -multiview submits each eye's layer with uMax = 2; keep the bounds on the texture.
++	vr::VRTextureBounds_t clamped;
++	if (bounds && (std::min({ bounds->uMin, bounds->uMax, bounds->vMin, bounds->vMax }) < 0.0f || std::max({ bounds->uMin, bounds->uMax, bounds->vMin, bounds->vMax }) > 1.0f)) {
++		OOVR_LOG_ONCEF("Clamping texture bounds %.3f,%.3f-%.3f,%.3f to the texture", bounds->uMin, bounds->vMin, bounds->uMax, bounds->vMax);
++		clamped = { std::clamp(bounds->uMin, 0.0f, 1.0f), std::clamp(bounds->vMin, 0.0f, 1.0f), std::clamp(bounds->uMax, 0.0f, 1.0f), std::clamp(bounds->vMax, 0.0f, 1.0f) };
++		bounds = &clamped;
++	}
+ 	if (bounds && bounds->vMin == 0.0f && bounds->vMax == 1.0f && bounds->uMin == 0.0f && bounds->uMax == 1.0f)
+ 		bounds = nullptr;
+ 	displayBounds = invertInCompositor ? nullptr : bounds;
+diff --git a/OpenOVR/Compositor/vkcompositor.cpp b/OpenOVR/Compositor/vkcompositor.cpp
+index 86d268b..e811a95 100644
+--- a/OpenOVR/Compositor/vkcompositor.cpp
++++ b/OpenOVR/Compositor/vkcompositor.cpp
+@@ -100,7 +100,7 @@ VkCompositor::~VkCompositor()
+ 	vkDestroyCommandPool(appDevice, appCommandPool, nullptr);
+ }
+ 
+-void VkCompositor::CopyToSwapchain(const vr::Texture_t* texture, const vr::VRTextureBounds_t* bounds, std::optional<XruEye>, vr::EVRSubmitFlags submitFlags)
++void VkCompositor::CopyToSwapchain(const vr::Texture_t* texture, const vr::VRTextureBounds_t* bounds, std::optional<XruEye> eye, vr::EVRSubmitFlags submitFlags)
+ {
+ 	const vr::VRVulkanTextureData_t* tex = (vr::VRVulkanTextureData_t*)texture->handle;
+ 
+@@ -108,6 +108,29 @@ void VkCompositor::CopyToSwapchain(const vr::Texture_t* texture, const vr::VRTex
+ 		ERR("Cannot use NULL Vulkan image data (VRVulkanTextureData_t)");
+ 	}
+ 
++	{
++		uint32_t layer = 0, layers = 0;
++		if (submitFlags & vr::Submit_VulkanTextureWithArrayData) {
++			auto array = static_cast<const vr::VRVulkanTextureArrayData_t*>(texture->handle);
++			layer = array->m_unArrayIndex;
++			layers = array->m_unArraySize;
++		}
++		const vr::VRTextureBounds_t* shown = bounds ? bounds : displayBounds;
++		char line[256];
++		snprintf(line, sizeof(line), "eye %d flags 0x%x %ux%u format %u samples %u layer %u/%u bounds %.3f,%.3f-%.3f,%.3f colour space %d queue family %u",
++		    eye.has_value() ? (int)*eye : -1, (unsigned)submitFlags, tex->m_nWidth, tex->m_nHeight, tex->m_nFormat, tex->m_nSampleCount, layer, layers,
++		    shown ? shown->uMin : 0.0f, shown ? shown->vMin : 0.0f, shown ? shown->uMax : 1.0f, shown ? shown->vMax : 1.0f,
++		    (int)texture->eColorSpace, tex->m_nQueueFamilyIndex);
++		static std::string last[2];
++		static int logged = 0;
++		std::string& previous = last[eye.has_value() && *eye == XruEyeRight ? 1 : 0];
++		if (previous != line && logged < 32) {
++			logged++;
++			previous = line;
++			OOVR_LOGF("Vulkan submit: %s", line);
++		}
++	}
++
+ 	// OpenXR only guarantees that the queue we initially gave it will have ownership of our swapchain image
+ 	// We could safeguard against any insane applications with a queue that we manage and copy to it,
+ 	// but it's simpler (and likely more performant) to just assume our app is sane.
+diff --git a/OpenOVR/Reimpl/BaseCompositor.cpp b/OpenOVR/Reimpl/BaseCompositor.cpp
+index 32fcb84..a76cfcf 100644
+--- a/OpenOVR/Reimpl/BaseCompositor.cpp
++++ b/OpenOVR/Reimpl/BaseCompositor.cpp
+@@ -292,7 +292,23 @@ ovr_enum_t BaseCompositor::Submit(EVREye eye, const Texture_t* texture, const VR
+ 
+ ovr_enum_t BaseCompositor::SubmitWithArrayIndex(vr::EVREye eye, const vr::Texture_t* texture, uint32_t idx, const vr::VRTextureBounds_t* bounds, vr::EVRSubmitFlags submitFlags)
+ {
+-	return Submit(eye, &texture[idx], bounds, submitFlags);
++	// The index selects a layer of the submitted texture, not an entry in an array of textures.
++	// A game that renders both eyes with multiview submits one layered image twice.
++	OOVR_LOG_ONCEF("SubmitWithArrayIndex: eye %d layer %u type %d flags 0x%x", (int)eye, idx, texture ? (int)texture->eType : -1, (unsigned)submitFlags);
++	if (texture && texture->eType == vr::TextureType_Vulkan && texture->handle) {
++		vr::VRVulkanTextureArrayData_t layer{};
++		if (submitFlags & vr::Submit_VulkanTextureWithArrayData)
++			layer = *static_cast<const vr::VRVulkanTextureArrayData_t*>(texture->handle);
++		else
++			static_cast<vr::VRVulkanTextureData_t&>(layer) = *static_cast<const vr::VRVulkanTextureData_t*>(texture->handle);
++		layer.m_unArrayIndex = idx;
++		if (layer.m_unArraySize <= idx)
++			layer.m_unArraySize = idx + 1;
++		vr::Texture_t layered = *texture;
++		layered.handle = &layer;
++		return Submit(eye, &layered, bounds, (vr::EVRSubmitFlags)(submitFlags | vr::Submit_VulkanTextureWithArrayData));
++	}
++	return Submit(eye, texture, bounds, submitFlags);
+ }
+ 
+ void BaseCompositor::ClearLastSubmittedFrame()

@@ -1,0 +1,305 @@
+diff --git a/DrvOpenXR/DrvOpenXR.cpp b/DrvOpenXR/DrvOpenXR.cpp
+index 8e3bd9c..131b174 100644
+--- a/DrvOpenXR/DrvOpenXR.cpp
++++ b/DrvOpenXR/DrvOpenXR.cpp
+@@ -223,6 +223,10 @@ IBackend* DrvOpenXR::CreateOpenXRBackend(const char* startupInfo)
+ 	if (availableExtensions.count(XR_EXT_HAND_TRACKING_EXTENSION_NAME))
+ 		extensions.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
+ 
++	// Eye gaze for IVRSystem::GetEyeTrackedFoveationCenter (games that foveate themselves)
++	if (availableExtensions.count(XR_FB_EYE_TRACKING_SOCIAL_EXTENSION_NAME))
++		extensions.push_back(XR_FB_EYE_TRACKING_SOCIAL_EXTENSION_NAME);
++
+ 	if (availableExtensions.count(XR_MNDX_XDEV_SPACE_EXTENSION_NAME))
+ 		extensions.push_back(XR_MNDX_XDEV_SPACE_EXTENSION_NAME);
+ 
+diff --git a/OpenOVR/Misc/xr_ext.h b/OpenOVR/Misc/xr_ext.h
+index fe27f69..4690649 100644
+--- a/OpenOVR/Misc/xr_ext.h
++++ b/OpenOVR/Misc/xr_ext.h
+@@ -37,6 +37,7 @@
+ 
+ #include "../logging.h"
+ 
++#include "../RuntimeExtensions/XR_FB_eye_tracking_social.h"
+ #include "../RuntimeExtensions/XR_MNDX_xdev_space.h"
+ #include <openxr/openxr_platform.h>
+ 
+@@ -97,6 +98,23 @@ public:
+ 		return pfnXrLocateHandJointsExt(handTracker, locateInfo, locations);
+ 	}
+ 
++	bool eyeTrackingSocialAvailable() { return pfnXrGetEyeGazesFB != nullptr; }
++	XrResult xrCreateEyeTrackerFB(XrSession session, const XrEyeTrackerCreateInfoFB* createInfo, XrEyeTrackerFB* eyeTracker)
++	{
++		OOVR_FALSE_ABORT(pfnXrCreateEyeTrackerFB);
++		return pfnXrCreateEyeTrackerFB(session, createInfo, eyeTracker);
++	}
++	XrResult xrDestroyEyeTrackerFB(XrEyeTrackerFB eyeTracker)
++	{
++		OOVR_FALSE_ABORT(pfnXrDestroyEyeTrackerFB);
++		return pfnXrDestroyEyeTrackerFB(eyeTracker);
++	}
++	XrResult xrGetEyeGazesFB(XrEyeTrackerFB eyeTracker, const XrEyeGazesInfoFB* gazeInfo, XrEyeGazesFB* eyeGazes)
++	{
++		OOVR_FALSE_ABORT(pfnXrGetEyeGazesFB);
++		return pfnXrGetEyeGazesFB(eyeTracker, gazeInfo, eyeGazes);
++	}
++
+ 	XrResult xrCreateXDevListMNDX(XrSession session, const XrCreateXDevListInfoMNDX* createInfo, XrXDevListMNDX* xdevList)
+ 	{
+ 		OOVR_FALSE_ABORT(pfnxrCreateXDevListMNDX);
+@@ -213,6 +231,10 @@ private:
+ 	PFN_xrDestroyHandTrackerEXT pfnXrDestroyHandTrackerExt = nullptr;
+ 	PFN_xrLocateHandJointsEXT pfnXrLocateHandJointsExt = nullptr;
+ 
++	PFN_xrCreateEyeTrackerFB pfnXrCreateEyeTrackerFB = nullptr;
++	PFN_xrDestroyEyeTrackerFB pfnXrDestroyEyeTrackerFB = nullptr;
++	PFN_xrGetEyeGazesFB pfnXrGetEyeGazesFB = nullptr;
++
+ 	PFN_xrCreateXDevListMNDX pfnxrCreateXDevListMNDX = nullptr;
+ 	PFN_xrGetXDevListGenerationNumberMNDX pfnxrGetXDevListGenerationNumberMNDX = nullptr;
+ 	PFN_xrEnumerateXDevsMNDX pfnxrEnumerateXDevsMNDX = nullptr;
+diff --git a/OpenOVR/Misc/xrutil.cpp b/OpenOVR/Misc/xrutil.cpp
+index 902bcd6..e17502b 100644
+--- a/OpenOVR/Misc/xrutil.cpp
++++ b/OpenOVR/Misc/xrutil.cpp
+@@ -30,6 +30,7 @@ XrExt::XrExt(XrGraphicsApiSupportedFlags apis, const std::vector<const char*>& e
+ 	bool hasVisMask = false;
+ 	bool hasHandTracking = false;
+ 	bool xdevSpace = false;
++	bool eyeTrackingSocial = false;
+ 	for (const char* ext : extensions) {
+ 		if (strcmp(ext, XR_KHR_VISIBILITY_MASK_EXTENSION_NAME) == 0)
+ 			hasVisMask = true;
+@@ -39,6 +40,8 @@ XrExt::XrExt(XrGraphicsApiSupportedFlags apis, const std::vector<const char*>& e
+ 			supportsG2Controller = true;
+ 		if (strcmp(ext, XR_MNDX_XDEV_SPACE_EXTENSION_NAME) == 0)
+ 			xdevSpace = true;
++		if (strcmp(ext, XR_FB_EYE_TRACKING_SOCIAL_EXTENSION_NAME) == 0)
++			eyeTrackingSocial = true;
+ 	}
+ 
+ #define XR_BIND(name, function) OOVR_FAILED_XR_ABORT(xrGetInstanceProcAddr(xr_instance, #name, (PFN_xrVoidFunction*)&this->function))
+@@ -53,6 +56,12 @@ XrExt::XrExt(XrGraphicsApiSupportedFlags apis, const std::vector<const char*>& e
+ 		XR_BIND(xrLocateHandJointsEXT, pfnXrLocateHandJointsExt);
+ 	}
+ 
++	if (eyeTrackingSocial) {
++		XR_BIND(xrCreateEyeTrackerFB, pfnXrCreateEyeTrackerFB);
++		XR_BIND(xrDestroyEyeTrackerFB, pfnXrDestroyEyeTrackerFB);
++		XR_BIND(xrGetEyeGazesFB, pfnXrGetEyeGazesFB);
++	}
++
+ 	if (xdevSpace) {
+ 		XR_BIND(xrCreateXDevListMNDX, pfnxrCreateXDevListMNDX);
+ 		XR_BIND(xrGetXDevListGenerationNumberMNDX, pfnxrGetXDevListGenerationNumberMNDX);
+diff --git a/OpenOVR/Reimpl/BaseSystem.cpp b/OpenOVR/Reimpl/BaseSystem.cpp
+index 9ca99e3..a09bc3b 100644
+--- a/OpenOVR/Reimpl/BaseSystem.cpp
++++ b/OpenOVR/Reimpl/BaseSystem.cpp
+@@ -883,17 +883,105 @@ bool BaseSystem::ComputeDistortionSet(vr::EVREye, vr::EVRDistortionChannel, bool
+ 	return false;
+ }
+ 
++namespace {
++// The XR_FB_eye_tracking_social tracker of the current session, made on first use. A tracker
++// ends with its session, and OpenComposite recreates the session for the game's graphics API.
++XrEyeTrackerFB eyeTracker = XR_NULL_HANDLE;
++XrSession eyeTrackerSession = XR_NULL_HANDLE;
++
++// Each eye's gaze direction in the view space, or false while the runtime has none.
++bool LocateEyeGazes(glm::vec3 (&directions)[2])
++{
++	if (!xr_ext || !xr_ext->eyeTrackingSocialAvailable() || !xr_gbl)
++		return false;
++	XrSession session = xr_session.get();
++	if (session == XR_NULL_HANDLE)
++		return false;
++	if (eyeTrackerSession != session) {
++		eyeTrackerSession = session;
++		eyeTracker = XR_NULL_HANDLE;
++		XrEyeTrackerCreateInfoFB createInfo{ XR_TYPE_EYE_TRACKER_CREATE_INFO_FB };
++		XrResult res = xr_ext->xrCreateEyeTrackerFB(session, &createInfo, &eyeTracker);
++		OOVR_LOGF("Eye tracker for foveation centers: XrResult %d", res);
++		if (XR_FAILED(res))
++			eyeTracker = XR_NULL_HANDLE;
++	}
++	if (eyeTracker == XR_NULL_HANDLE)
++		return false;
++
++	XrEyeGazesInfoFB info{ XR_TYPE_EYE_GAZES_INFO_FB };
++	info.baseSpace = xr_gbl->viewSpace;
++	info.time = xr_gbl->GetBestTime();
++	XrEyeGazesFB gazes{ XR_TYPE_EYE_GAZES_FB };
++	if (XR_FAILED(xr_ext->xrGetEyeGazesFB(eyeTracker, &info, &gazes)))
++		return false;
++	bool valid[2] = {};
++	for (int eye = 0; eye < 2; eye++) {
++		valid[eye] = gazes.gaze[eye].isValid;
++		if (valid[eye])
++			directions[eye] = X2G_quat(gazes.gaze[eye].gazePose.orientation) * glm::vec3(0, 0, -1);
++	}
++	if (!valid[0] && !valid[1])
++		return false;
++	if (!valid[0])
++		directions[0] = directions[1];
++	if (!valid[1])
++		directions[1] = directions[0];
++	// Only a gaze into the view frustum has a centre to give.
++	return directions[0].z < -0.1f && directions[1].z < -0.1f;
++}
++
++// Where a view-space direction lands in an eye's NDC (y up), for the frustum GetProjectionMatrix builds.
++vr::HmdVector2_t EyeNdc(const XrView& view, const glm::vec3& direction)
++{
++	const glm::vec3 d = glm::inverse(X2G_quat(view.pose.orientation)) * direction;
++	const float x = d.x / -d.z, y = d.y / -d.z;
++	const float left = tanf(view.fov.angleLeft), right = tanf(view.fov.angleRight);
++	const float up = tanf(view.fov.angleUp), down = tanf(view.fov.angleDown);
++	return { 2.0f * (x - left) / (right - left) - 1.0f, 2.0f * (y - down) / (up - down) - 1.0f };
++}
++} // namespace
++
+ bool BaseSystem::GetEyeTrackedFoveationCenter(vr::HmdVector2_t* left, vr::HmdVector2_t* right)
+ {
++	OOVR_LOG_ONCE("Game asks for eye-tracked foveation centers");
+ 	if (left) *left = {};
+ 	if (right) *right = {};
+-	return false;
++	glm::vec3 directions[2];
++	if (!LocateEyeGazes(directions))
++		return false;
++	const XruCachedViews views = xr_gbl->GetCachedViews(xr_gbl->viewSpace);
++	if (views.viewCount != XruEyeCount || !(views.viewState.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT))
++		return false;
++	if (left) *left = EyeNdc(views.views[0], directions[0]);
++	if (right) *right = EyeNdc(views.views[1], directions[1]);
++	OOVR_LOG_ONCE("First eye-tracked foveation centers sent");
++	return true;
+ }
+ 
+-bool BaseSystem::GetEyeTrackedFoveationCenterForProjection(const vr::HmdMatrix44_t*, vr::HmdVector2_t* center)
++bool BaseSystem::GetEyeTrackedFoveationCenterForProjection(const vr::HmdMatrix44_t* projection, vr::HmdVector2_t* center)
+ {
+ 	if (center) *center = {};
+-	return false;
++	glm::vec3 directions[2];
++	if (!projection || !center || !LocateEyeGazes(directions))
++		return false;
++	// The head's gaze at infinity through the caller's projection (rows act on column vectors).
++	const glm::vec3 d = glm::normalize(directions[0] + directions[1]);
++	const auto& m = projection->m;
++	const float x = m[0][0] * d.x + m[0][1] * d.y + m[0][2] * d.z;
++	const float y = m[1][0] * d.x + m[1][1] * d.y + m[1][2] * d.z;
++	const float w = m[3][0] * d.x + m[3][1] * d.y + m[3][2] * d.z;
++	if (w <= 0.0f)
++		return false;
++	*center = { x / w, y / w };
++	static int logged = 0;
++	if (logged < 12) {
++		logged++;
++		OOVR_LOGF("Foveation center for projection: frame %lld row0 %.4f %.4f %.4f %.4f row1 %.4f %.4f %.4f %.4f row3 %.4f %.4f %.4f %.4f gaze %.4f %.4f %.4f -> %.4f %.4f",
++		    (long long)xr_gbl->nextPredictedFrameTime, m[0][0], m[0][1], m[0][2], m[0][3], m[1][0], m[1][1], m[1][2], m[1][3],
++		    m[3][0], m[3][1], m[3][2], m[3][3], d.x, d.y, d.z, center->v[0], center->v[1]);
++	}
++	return true;
+ }
+ 
+ vr::EVRInitError BaseSystem::SetSDKVersion(uint32_t major, uint32_t minor, uint32_t build)
+diff --git a/OpenOVR/Reimpl/BaseSystem.h b/OpenOVR/Reimpl/BaseSystem.h
+index e663652..f3cd499 100644
+--- a/OpenOVR/Reimpl/BaseSystem.h
++++ b/OpenOVR/Reimpl/BaseSystem.h
+@@ -54,7 +54,8 @@ public:
+ public:
+ 	BaseSystem();
+ 
+-	// OpenVR 2.15.6 ABI. Optional eye tracking/distortion remain explicitly unsupported.
++	// OpenVR 2.15.6 ABI. Eye-tracked foveation centers come from XR_FB_eye_tracking_social;
++	// distortion remains explicitly unsupported.
+ 	bool ComputeDistortionSet(vr::EVREye eye, vr::EVRDistortionChannel channel, bool ndc,
+ 	    uint32_t count, const vr::DistortionCoordinate_t* input, vr::DistortionCoordinate_t* output);
+ 	bool PollNextEventWithPoseAndOverlays(vr::ETrackingUniverseOrigin origin, vr::VREvent_t* event,
+diff --git a/RuntimeExtensions/XR_FB_eye_tracking_social.h b/RuntimeExtensions/XR_FB_eye_tracking_social.h
+new file mode 100644
+index 0000000..7747215
+--- /dev/null
++++ b/RuntimeExtensions/XR_FB_eye_tracking_social.h
+@@ -0,0 +1,76 @@
++// Copyright (c) 2017-2025 The Khronos Group Inc.
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++/*!
++ * @file
++ * @brief  XR_FB_eye_tracking_social, as in the OpenXR registry. The bundled OpenXR SDK
++ *         (1.0.12) predates it.
++ */
++#ifndef XR_FB_EYE_TRACKING_SOCIAL_H
++#define XR_FB_EYE_TRACKING_SOCIAL_H 1
++
++#include "openxr_extension_helpers.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#ifndef XR_FB_eye_tracking_social
++#define XR_FB_eye_tracking_social 1
++XR_DEFINE_HANDLE(XrEyeTrackerFB)
++#define XR_FB_eye_tracking_social_SPEC_VERSION 1
++#define XR_FB_EYE_TRACKING_SOCIAL_EXTENSION_NAME "XR_FB_eye_tracking_social"
++
++XR_STRUCT_ENUM(XR_TYPE_EYE_TRACKER_CREATE_INFO_FB, 1000202001);
++XR_STRUCT_ENUM(XR_TYPE_EYE_GAZES_INFO_FB, 1000202002);
++XR_STRUCT_ENUM(XR_TYPE_EYE_GAZES_FB, 1000202003);
++XR_STRUCT_ENUM(XR_TYPE_SYSTEM_EYE_TRACKING_PROPERTIES_FB, 1000202004);
++
++typedef enum XrEyePositionFB {
++	XR_EYE_POSITION_LEFT_FB = 0,
++	XR_EYE_POSITION_RIGHT_FB = 1,
++	XR_EYE_POSITION_COUNT_FB = 2,
++	XR_EYE_POSITION_MAX_ENUM_FB = 0x7FFFFFFF
++} XrEyePositionFB;
++
++typedef struct XrEyeGazeFB {
++	XrBool32 isValid;
++	XrPosef gazePose;
++	float gazeConfidence;
++} XrEyeGazeFB;
++
++typedef struct XrEyeTrackerCreateInfoFB {
++	XrStructureType type;
++	const void* XR_MAY_ALIAS next;
++} XrEyeTrackerCreateInfoFB;
++
++typedef struct XrEyeGazesInfoFB {
++	XrStructureType type;
++	const void* XR_MAY_ALIAS next;
++	XrSpace baseSpace;
++	XrTime time;
++} XrEyeGazesInfoFB;
++
++// XrSystemEyeTrackingPropertiesFB extends XrSystemProperties
++typedef struct XrSystemEyeTrackingPropertiesFB {
++	XrStructureType type;
++	void* XR_MAY_ALIAS next;
++	XrBool32 supportsEyeTracking;
++} XrSystemEyeTrackingPropertiesFB;
++
++typedef struct XrEyeGazesFB {
++	XrStructureType type;
++	void* XR_MAY_ALIAS next;
++	XrEyeGazeFB gaze[XR_EYE_POSITION_COUNT_FB];
++	XrTime time;
++} XrEyeGazesFB;
++
++typedef XrResult(XRAPI_PTR* PFN_xrCreateEyeTrackerFB)(XrSession session, const XrEyeTrackerCreateInfoFB* createInfo, XrEyeTrackerFB* eyeTracker);
++typedef XrResult(XRAPI_PTR* PFN_xrDestroyEyeTrackerFB)(XrEyeTrackerFB eyeTracker);
++typedef XrResult(XRAPI_PTR* PFN_xrGetEyeGazesFB)(XrEyeTrackerFB eyeTracker, const XrEyeGazesInfoFB* gazeInfo, XrEyeGazesFB* eyeGazes);
++#endif
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif

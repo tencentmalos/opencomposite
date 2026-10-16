@@ -81,6 +81,26 @@ if ($LASTEXITCODE -ne 0) { throw "Displayed-bounds copy patch no longer applies"
 git -C $source apply $boundsPatch
 if ($LASTEXITCODE -ne 0) { throw "Could not apply the displayed-bounds copy patch" }
 
+# IVRSystem::GetEyeTrackedFoveationCenter from XR_FB_eye_tracking_social, so games that
+# foveate themselves (Half-Life: Alyx with -vulkan) follow the eye gaze. Needs the System 026 ABI.
+$eyePatch = Join-Path $PSScriptRoot "patches\eye-tracked-foveation.patch"
+$eyeMarker = "Eye tracker for foveation centers"
+if ($EnableSystem026) {
+    git -C $source apply --check $eyePatch
+    if ($LASTEXITCODE -ne 0) { throw "Eye-tracked foveation patch no longer applies" }
+    git -C $source apply $eyePatch
+    if ($LASTEXITCODE -ne 0) { throw "Could not apply the eye-tracked foveation patch" }
+}
+
+# IVRCompositor::SubmitWithArrayIndex submits a layer of one Vulkan image instead of reading past
+# the single Texture_t; the Vulkan copy logs each eye's submit when it changes.
+$arrayPatch = Join-Path $PSScriptRoot "patches\vulkan-array-submit.patch"
+$arrayMarker = "SubmitWithArrayIndex: eye %d layer %u"
+git -C $source apply --check $arrayPatch
+if ($LASTEXITCODE -ne 0) { throw "Vulkan array submit patch no longer applies" }
+git -C $source apply $arrayPatch
+if ($LASTEXITCODE -ne 0) { throw "Could not apply the Vulkan array submit patch" }
+
 $bundledVulkan = Join-Path $source "libs\vulkan"
 New-Item -ItemType Directory -Force -Path (Join-Path $bundledVulkan "Include"), (Join-Path $bundledVulkan "Lib") | Out-Null
 Copy-Item -Recurse -Force -Path (Join-Path $vulkanInclude "*") -Destination (Join-Path $bundledVulkan "Include")
@@ -100,6 +120,8 @@ if ([BitConverter]::ToUInt16($bytes, $offset + 4) -ne 0x8664) { throw "Output is
 if (-not [System.Text.Encoding]::ASCII.GetString($bytes).Contains($marker)) { throw "Output does not contain the background-app patch" }
 if (-not [System.Text.Encoding]::ASCII.GetString($bytes).Contains($mailboxMarker)) { throw "Output does not contain the mailbox forward patch" }
 if (-not [System.Text.Encoding]::ASCII.GetString($bytes).Contains($boundsMarker)) { throw "Output does not contain the displayed-bounds copy patch" }
+if ($EnableSystem026 -and -not [System.Text.Encoding]::ASCII.GetString($bytes).Contains($eyeMarker)) { throw "Output does not contain the eye-tracked foveation patch" }
+if (-not [System.Text.Encoding]::ASCII.GetString($bytes).Contains($arrayMarker)) { throw "Output does not contain the Vulkan array submit patch" }
 
 $destination = Join-Path $output "opencomposite_x64.dll"
 Copy-Item -Force -LiteralPath $binary -Destination $destination
